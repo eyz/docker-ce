@@ -709,6 +709,11 @@ func (container *Container) BuildJoinOptions(n named) ([]libnetwork.EndpointOpti
 				return nil, err
 			}
 			joinOptions = append(joinOptions, libnetwork.CreateOptionAlias(name, alias))
+			// eyz START: add network alias which includes the container FQDN (Hostname + Domainname)
+			if container.Config.Domainname != "" {
+				joinOptions = append(joinOptions, libnetwork.CreateOptionAlias(name, container.Config.Hostname+"."+container.Config.Domainname))
+			}
+			// eyz STOP: add network alias which includes the container FQDN (Hostname + Domainname)
 		}
 		for k, v := range epConfig.DriverOpts {
 			joinOptions = append(joinOptions, libnetwork.EndpointOptionGeneric(options.Generic{k: v}))
@@ -759,8 +764,10 @@ func (container *Container) BuildCreateEndpointOptions(n libnetwork.Network, epC
 				return nil, errors.Errorf("Invalid IPv6 address: %s)", ipam.IPv6Address)
 			}
 
+			// eyz START: support sending hostname and domainname in IPAM
 			createOptions = append(createOptions,
-				libnetwork.CreateOptionIpam(ip, ip6, ipList, nil))
+				libnetwork.CreateOptionIpam(ip, ip6, ipList, ipam.Hostname, ipam.Domainname, nil))
+			// eyz END: support sending hostname and domainname in IPAM
 
 		}
 

@@ -1,12 +1,15 @@
 package replicated
 
 import (
+	"time"
+
 	"github.com/docker/go-events"
 	"github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/log"
 	"github.com/docker/swarmkit/manager/orchestrator"
 	"github.com/docker/swarmkit/manager/orchestrator/taskinit"
 	"github.com/docker/swarmkit/manager/state/store"
+	"github.com/docker/swarmkit/protobuf/ptypes"
 	"golang.org/x/net/context"
 )
 
@@ -23,6 +26,9 @@ func (r *Orchestrator) handleTaskEvent(ctx context.Context, event events.Event) 
 	switch v := event.(type) {
 	case api.EventDeleteNode:
 		r.restartTasksByNodeID(ctx, v.Node.ID)
+		// eyz START: allow orphaned Swarm tasks assigned to a deleted node to start elseware
+		r.restartOrphanedTasksByNodeID(ctx, v.Node.ID)
+		// eyz STOP: allow orphaned Swarm tasks assigned to a deleted node to start elseware
 	case api.EventCreateNode:
 		r.handleNodeChange(ctx, v.Node)
 	case api.EventUpdateNode:
@@ -82,29 +88,86 @@ func (r *Orchestrator) tickTasks(ctx context.Context) {
 	}
 }
 
+// eyz START: set Swarm tasks to orphaned state if node becomes unavailable
 func (r *Orchestrator) restartTasksByNodeID(ctx context.Context, nodeID string) {
-	var err error
-	r.store.View(func(tx store.ReadTx) {
-		var tasks []*api.Task
-		tasks, err = store.FindTasks(tx, store.ByNodeID(nodeID))
-		if err != nil {
-			return
-		}
+	err := r.store.Batch(func(batch *store.Batch) error {
+		return batch.Update(func(tx store.Tx) error {
+			var tasks []*api.Task
+			var err error
+			tasks, err = store.FindTasks(tx, store.ByNodeID(nodeID))
+			if err != nil {
+				return err
+			}
 
-		for _, t := range tasks {
-			if t.DesiredState > api.TaskStateRunning {
-				continue
+			// Testing (Isaac, 20171106)
+			var n *api.Node
+			n = store.GetNode(tx, nodeID)
+			nBlockRestartNodeDown := (n != nil && n.Spec.Availability == api.NodeAvailabilityActive && n.Status.State == api.NodeStatus_DOWN)
+
+			for _, t := range tasks {
+				if t.DesiredState > api.TaskStateRunning {
+					continue
+				}
+
+				// Testing (Isaac, 20171106)
+				//if nBlockRestartNodeDown && t != nil && t.Status.State >= api.TaskStateAssigned && t.Status.State <= api.TaskStateRunning {
+				if nBlockRestartNodeDown && t.Status.State >= api.TaskStateAssigned {
+					//t.DesiredState = api.TaskStateOrphaned
+					t.Status.State = api.TaskStateOrphaned
+					t.Status.Timestamp = ptypes.MustTimestampProto(time.Now())
+					store.UpdateTask(tx, t)
+					continue
+				}
+
+				service := store.GetService(tx, t.ServiceID)
+				if orchestrator.IsReplicatedService(service) {
+					r.restartTasks[t.ID] = struct{}{}
+				}
 			}
-			service := store.GetService(tx, t.ServiceID)
-			if orchestrator.IsReplicatedService(service) {
-				r.restartTasks[t.ID] = struct{}{}
-			}
-		}
+
+			return nil
+		})
 	})
 	if err != nil {
-		log.G(ctx).WithError(err).Errorf("failed to list tasks to remove")
+		log.G(ctx).WithError(err).Errorf("failed to list and/or update tasks to restart")
 	}
 }
+
+// eyz STOP: set Swarm tasks to orphaned state if node becomes unavailable
+
+// eyz START: allow orphaned Swarm tasks assigned to a deleted node to start elseware
+func (r *Orchestrator) restartOrphanedTasksByNodeID(ctx context.Context, nodeID string) {
+	err := r.store.Batch(func(batch *store.Batch) error {
+		return batch.Update(func(tx store.Tx) error {
+			var tasks []*api.Task
+			var err error
+			tasks, err = store.FindTasks(tx, store.ByNodeID(nodeID))
+			if err != nil {
+				return err
+			}
+
+			for _, t := range tasks {
+				if t.Status.State == api.TaskStateOrphaned {
+					service := store.GetService(tx, t.ServiceID)
+					if orchestrator.IsReplicatedService(service) {
+						t.DesiredState = api.TaskStateRunning
+						t.Status.State = api.TaskStateShutdown
+						t.Status.Timestamp = ptypes.MustTimestampProto(time.Now())
+						store.UpdateTask(tx, t)
+						r.restartTasks[t.ID] = struct{}{}
+					}
+				}
+			}
+
+			return nil
+		})
+	})
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("failed to list tasks and/or restart orphans")
+	}
+}
+
+// eyz STOP: allow orphaned Swarm tasks assigned to a deleted node to start elseware
 
 func (r *Orchestrator) handleNodeChange(ctx context.Context, n *api.Node) {
 	if !orchestrator.InvalidNode(n) {

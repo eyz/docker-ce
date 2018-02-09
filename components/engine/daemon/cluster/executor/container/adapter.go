@@ -382,6 +382,13 @@ func (c *containerAdapter) createVolumes(ctx context.Context) error {
 			continue
 		}
 
+		// eyz START: support custom volume naming when using netapp volume driver
+		// Isaac (20171022): do not create netapp volumes here; we currently let them get created by the container.go code instead
+		if mount.VolumeOptions.DriverConfig.Name == "netapp" {
+			continue
+		}
+		// eyz END: support custom volume naming when using netapp volume driver
+
 		req := c.container.volumeCreateRequest(&mount)
 
 		// Check if this volume exists on the engine

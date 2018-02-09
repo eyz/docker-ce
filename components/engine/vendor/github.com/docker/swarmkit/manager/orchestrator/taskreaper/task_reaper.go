@@ -141,9 +141,16 @@ func (tr *TaskReaper) Run(ctx context.Context) {
 				// add tasks that have progressed beyond COMPLETE and have desired state REMOVE. These
 				// tasks are associated with slots that were removed as part of a service scale down
 				// or service removal.
-				if t.DesiredState == api.TaskStateRemove && t.Status.State >= api.TaskStateCompleted {
+
+				// eyz START: allow Swarm tasks to be cleaned up if they are in a pending state and are marked for removal
+				// found when tasks were still in api.TaskStatePending from a bad service scale (typically when more replicas are requested than nodes which are suitable for placement
+				// NOTE: if we don't reap the api.TaskStatePending state tasks here, then we need to wait for an update to the service first
+				// RATIONALE: it should be safe to cleanup tasks which were never assigned and started, which we want to remove
+				// if t.DesiredState == api.TaskStateRemove && t.Status.State >= api.TaskStateCompleted {
+				if t.DesiredState == api.TaskStateRemove && (t.Status.State == api.TaskStatePending || t.Status.State >= api.TaskStateCompleted) {
 					tr.cleanup = append(tr.cleanup, t.ID)
 				}
+				// eyz STOP: allow Swarm tasks to be cleaned up if they are in a pending state and are marked for removal
 			case api.EventUpdateCluster:
 				tr.taskHistory = v.Cluster.Spec.Orchestration.TaskHistoryRetentionLimit
 			}

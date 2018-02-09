@@ -32,17 +32,42 @@ var (
 	getPortMapInfo    = container.GetSandboxPortMapInfo
 )
 
-func (daemon *Daemon) getDNSSearchSettings(container *container.Container) []string {
-	if len(container.HostConfig.DNSSearch) > 0 {
-		return container.HostConfig.DNSSearch
-	}
+// eyz START: de-duplicate DNS search domains
+func removeDuplicates(elements []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
 
-	if len(daemon.configStore.DNSSearch) > 0 {
-		return daemon.configStore.DNSSearch
+	for _, element := range elements {
+		if !seen[element] {
+			seen[element] = true
+			result = append(result, element)
+		}
+	}
+	return result
+}
+
+// eyz STOP: de-duplicate DNS search domains
+
+// eyz START: de-duplicate DNS search domains
+func (daemon *Daemon) getDNSSearchSettings(container *container.Container) []string {
+	/*
+		  if len(container.HostConfig.DNSSearch) > 0 {
+				return container.HostConfig.DNSSearch
+			}
+
+			if len(daemon.configStore.DNSSearch) > 0 {
+				return daemon.configStore.DNSSearch
+			}
+	*/
+
+	if len(container.HostConfig.DNSSearch) > 0 || len(daemon.configStore.DNSSearch) > 0 {
+		return removeDuplicates(append(container.HostConfig.DNSSearch, daemon.configStore.DNSSearch...))
 	}
 
 	return nil
 }
+
+// eyz STOP: de-duplicate DNS search domains
 
 func (daemon *Daemon) buildSandboxOptions(container *container.Container) ([]libnetwork.SandboxOption, error) {
 	var (
@@ -116,14 +141,50 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container) ([]lib
 		}
 	}
 
+	// eyz START: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
+	// NOTE: if env var DOCKER_HOST_EXPORT_IP is set on the host, then
+	// 1) we intend to create a hosts entry of "host" with the value of DOCKER_HOST_EXPORT_IP -- dockerHostExportIpAppendHost will be set: true
+	// 2) we intend to persist this environment variable into each launched container
+	dockerHostExportIpVal, dockerHostExportIpEnvExported := os.LookupEnv("DOCKER_HOST_EXPORT_IP")
+	// dockerHostExportIpAppendHost defaults to true if dockerHostExportIpEnvExported
+	dockerHostExportIpAppendHost := dockerHostExportIpEnvExported
+	// eyz STOP: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
+
 	for _, extraHost := range container.HostConfig.ExtraHosts {
 		// allow IPv6 addresses in extra hosts; only split on first ":"
 		if _, err := opts.ValidateExtraHost(extraHost); err != nil {
 			return nil, err
 		}
 		parts := strings.SplitN(extraHost, ":", 2)
+
+		// eyz START: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
+		// NOTE: if an extraHost entry for "host" (case-insensitive) has been specified, then we will not append the DOCKER_HOST_EXPORT_IP -- letting this extraHost of "host" override DOCKER_HOST_EXPORT_IP even if it is set
+		if strings.ToLower(parts[0]) == "host" {
+			dockerHostExportIpAppendHost = false
+		}
+		// eyz STOP: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
+
 		sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost(parts[0], parts[1]))
 	}
+
+	// eyz START: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
+	// NOTE: if env var DOCKER_HOST_EXPORT_IP is set on the host, then create a hosts entry of "host" with the value of DOCKER_HOST_EXPORT_IP
+	if dockerHostExportIpAppendHost {
+		sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost("host", dockerHostExportIpVal))
+	}
+
+	if dockerHostExportIpEnvExported {
+		dockerHostExportIpEnvInConfig := false
+		for _, envValue := range container.Config.Env {
+			if strings.HasPrefix(strings.ToUpper(envValue), "DOCKER_HOST_EXPORT_IP=") {
+				dockerHostExportIpEnvInConfig = true
+			}
+		}
+		if !dockerHostExportIpEnvInConfig {
+			container.Config.Env = append(container.Config.Env, fmt.Sprintf("DOCKER_HOST_EXPORT_IP=%s", dockerHostExportIpVal))
+		}
+	}
+	// eyz STOP: add container "host" /etc/hosts entry equal to value of DOCKER_HOST_EXPORT_IP environment variable if defined
 
 	if container.HostConfig.PortBindings != nil {
 		for p, b := range container.HostConfig.PortBindings {
@@ -718,6 +779,17 @@ func (daemon *Daemon) connectToNetwork(container *container.Container, idOrName 
 			endpointConfig.NetworkID = epConfig.NetworkID
 		}
 	}
+
+	// eyz START: support sending hostname and domainname in IPAM
+	if endpointConfig.IPAMConfig != nil {
+		if container.Config.Hostname != "" {
+			endpointConfig.IPAMConfig.Hostname = container.Config.Hostname
+		}
+		if container.Config.Domainname != "" {
+			endpointConfig.IPAMConfig.Domainname = container.Config.Domainname
+		}
+	}
+	// eyz END: support sending hostname and domainname in IPAM
 
 	err = daemon.updateNetworkConfig(container, n, endpointConfig, updateSettings)
 	if err != nil {

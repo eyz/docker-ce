@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	// eyz START: support custom volume naming when using netapp volume driver
+	"regexp"
+	// eyz STOP: support custom volume naming when using netapp volume driver
 	"strconv"
 	"strings"
 	"time"
@@ -131,7 +134,16 @@ func (c *containerConfig) name() string {
 	}
 
 	// fallback to service.slot.id.
-	return fmt.Sprintf("%s.%s.%s", c.task.ServiceAnnotations.Name, slot, c.task.ID)
+	// eyz START: support custom volume naming when using netapp volume driver, use dashes as seperators for container names
+	//return fmt.Sprintf("%s.%s.%s", c.task.ServiceAnnotations.Name, slot, c.task.ID)
+	// only override container name if we are using a netapp mount volume driver
+	if c.hasMountDriverName("netapp") {
+		return fmt.Sprintf("%s-%s", c.task.ServiceAnnotations.Name, slot)
+	} else {
+		return fmt.Sprintf("%s-%s-%s", c.task.ServiceAnnotations.Name, slot, c.task.ID)
+	}
+	// eyz END: support custom volume naming when using netapp volume driver, use dashes as seperators for container names
+
 }
 
 func (c *containerConfig) image() string {
@@ -208,6 +220,40 @@ func (c *containerConfig) config() *enginecontainer.Config {
 		Healthcheck:  c.healthcheck(),
 	}
 
+	// eyz START: support custom volume naming when using netapp volume driver, use dashes as seperators for container names, work in-progress DNS domainname changes
+	// If we have a defined service name and slot ...
+	if c.task != nil && c.task.ServiceAnnotations.Name != "" && c.task.Slot > 0 {
+
+		slot := fmt.Sprint(c.task.Slot)
+		if slot == "" || c.task.Slot == 0 {
+			slot = c.task.NodeID
+		}
+
+		if c.hasMountDriverName("netapp") {
+			// ... and we're using a netapp mount volume driver, then set the Hostname to "SERVICENAME-SLOT"
+			config.Hostname = fmt.Sprintf("%s-%s", c.task.ServiceAnnotations.Name, slot)
+		} else {
+			// ... otherwise, set the Hostname "SERVICENAME-SLOT-TASKID"
+			config.Hostname = fmt.Sprintf("%s-%s-%s", c.task.ServiceAnnotations.Name, slot, c.task.ID)
+		}
+
+		///// testing START
+		stackNamespace, stackNamespaceExists := c.task.ServiceAnnotations.Labels["com.docker.stack.namespace"]
+		if stackNamespaceExists {
+			//config.Domainname = fmt.Sprintf("%s.swarm.DOMAIN.COM", stackNamespace)
+			// doesn't work
+			// config.Domainname = stackNamespace + "-test"
+			// config.Domainname = stackNamespace + ".swarm"
+			// works -
+			config.Domainname = stackNamespace
+		} else {
+			config.Domainname = "nostack"
+		}
+		logrus.Debugf("* engine/daemon/cluster/executor/container config() set config.Domainname to: %s", config.Domainname)
+		///// testing STOP
+	}
+	// eyz STOP: support custom volume naming when using netapp volume driver, use dashes as seperators for container names, work in-progress DNS domainname changes
+
 	if len(c.spec().Command) > 0 {
 		// If Command is provided, we replace the whole invocation with Command
 		// by replacing Entrypoint and specifying Cmd. Args is ignored in this
@@ -255,13 +301,50 @@ func (c *containerConfig) labels() map[string]string {
 	return labels
 }
 
+// eyz START: support custom volume naming when using netapp volume driver
+// helper function to find if a mount volume driver name was found
+func (c *containerConfig) hasMountDriverName(mountDriverName string) bool {
+	for _, mount := range c.spec().Mounts {
+		m := convertMount(mount)
+		if m.VolumeOptions != nil && m.VolumeOptions.DriverConfig != nil && m.VolumeOptions.DriverConfig.Name == mountDriverName {
+			return true
+		}
+	}
+	return false
+}
+
+// eyz END: support custom volume naming when using netapp volume driver
+
+// eyz START: support custom volume naming when using netapp volume driver
 func (c *containerConfig) mounts() []enginemount.Mount {
 	var r []enginemount.Mount
+	nonWordRegex, _ := regexp.Compile("[^a-zA-Z0-9]+")
 	for _, mount := range c.spec().Mounts {
-		r = append(r, convertMount(mount))
+		m := convertMount(mount)
+		if m.VolumeOptions != nil && m.VolumeOptions.DriverConfig != nil && m.VolumeOptions.DriverConfig.Name == "netapp" && c.task != nil && c.task.ServiceAnnotations.Name != "" && c.task.Slot > 0 {
+			slot := fmt.Sprint(c.task.Slot)
+			if slot == "" || c.task.Slot == 0 {
+				slot = c.task.NodeID
+			}
+
+			var newSourceRaw string
+			// if m.Source starts with c.task.ServiceAnnotations.Name, then don't include the c.task.ServiceAnnotations.Name prepend in the new volume Source; only the m.Source and slot, as c.task.ServiceAnnotations.Name would be redundant in this case
+			if strings.HasPrefix(m.Source, c.task.ServiceAnnotations.Name) {
+				newSourceRaw = fmt.Sprintf("%s_%s", m.Source, slot)
+			} else {
+				newSourceRaw = fmt.Sprintf("%s_%s_%s", c.task.ServiceAnnotations.Name, m.Source, slot)
+			}
+			// for compatibility with the NetApp Docker Volume Plugin, ensure all contiguous non-word characters are replaced with underscores
+			m.Source = nonWordRegex.ReplaceAllString(newSourceRaw, "_")
+		}
+		r = append(r, m)
+		//r = append(r, convertMount(mount))
+
 	}
 	return r
 }
+
+// eyz END: support custom volume naming when using netapp volume driver
 
 func convertMount(m api.Mount) enginemount.Mount {
 	mount := enginemount.Mount{
@@ -362,6 +445,19 @@ func (c *containerConfig) hostConfig() *enginecontainer.HostConfig {
 		hc.DNSSearch = c.spec().DNSConfig.Search
 		hc.DNSOptions = c.spec().DNSConfig.Options
 	}
+
+	// eyz START: work in-progress DNS domainname changes
+	stackNamespace, stackNamespaceExists := c.task.ServiceAnnotations.Labels["com.docker.stack.namespace"]
+	if stackNamespaceExists {
+		//stackNamespaceSearchDomainPrepend := []string{fmt.Sprintf("%s.swarm.DOMAIN.COM", stackNamespace)}
+		stackNamespaceSearchDomainPrepend := []string{stackNamespace}
+		if len(hc.DNSSearch) > 0 {
+			hc.DNSSearch = append(stackNamespaceSearchDomainPrepend, hc.DNSSearch...)
+		} else {
+			hc.DNSSearch = stackNamespaceSearchDomainPrepend
+		}
+	}
+	// eyz STOP: work in-progress DNS domainname changes
 
 	c.applyPrivileges(hc)
 

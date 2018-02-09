@@ -1,6 +1,10 @@
 package scheduler
 
 import (
+	// eyz START: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+	"sort"
+	"strconv"
+	// eyz STOP: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
 	"time"
 
 	"github.com/docker/swarmkit/api"
@@ -632,12 +636,52 @@ func (s *Scheduler) scheduleNTasksOnSubtree(ctx context.Context, n int, taskGrou
 	return tasksScheduled
 }
 
+// eyz START: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+type TypeSlotSorter struct {
+	Keys []string
+	Vals []*api.Task
+}
+
+func NewTypeSlotSorter(m map[string]*api.Task) *TypeSlotSorter {
+	tss := &TypeSlotSorter{
+		Keys: make([]string, 0, len(m)),
+		Vals: make([]*api.Task, 0, len(m)),
+	}
+	for k, v := range m {
+		tss.Keys = append(tss.Keys, k)
+		tss.Vals = append(tss.Vals, v)
+	}
+	return tss
+}
+
+func (tss TypeSlotSorter) Len() int           { return len(tss.Vals) }
+func (tss TypeSlotSorter) Less(i, j int) bool { return tss.Vals[i].Slot < tss.Vals[j].Slot }
+func (tss TypeSlotSorter) Swap(i, j int) {
+	tss.Vals[i], tss.Vals[j] = tss.Vals[j], tss.Vals[i]
+	tss.Keys[i], tss.Keys[j] = tss.Keys[j], tss.Keys[i]
+}
+func (tss *TypeSlotSorter) Sort() {
+	sort.Sort(tss)
+}
+
+// eyz STOP: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+
 func (s *Scheduler) scheduleNTasksOnNodes(ctx context.Context, n int, taskGroup map[string]*api.Task, nodes []NodeInfo, schedulingDecisions map[string]schedulingDecision, nodeLess func(a *NodeInfo, b *NodeInfo) bool) int {
 	tasksScheduled := 0
 	failedConstraints := make(map[int]bool) // key is index in nodes slice
 	nodeIter := 0
 	nodeCount := len(nodes)
-	for taskID, t := range taskGroup {
+
+	// eyz START: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+	//for taskID, t := range taskGroup {
+	tss := NewTypeSlotSorter(taskGroup)
+	tss.Sort()
+
+	for index, _ := range tss.Keys {
+		taskID := tss.Keys[index]
+		t := tss.Vals[index]
+		// eyz STOP: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+
 		// Skip tasks which were already scheduled because they ended
 		// up in two groups at once.
 		if _, exists := schedulingDecisions[taskID]; exists {
@@ -645,6 +689,30 @@ func (s *Scheduler) scheduleNTasksOnNodes(ctx context.Context, n int, taskGroup 
 		}
 
 		node := &nodes[nodeIter%nodeCount]
+
+		// eyz START: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
+		// if t.Spec.Runtime is a *api.TaskSpec_Container, then we can check for container-related fields; if not, then we safely skip this custom code block
+		if candidateTaskSpecContainer, isTaskSpecContainer := t.Spec.Runtime.(*api.TaskSpec_Container); isTaskSpecContainer {
+			// default eyz policy; can be overwritten by container label "eyz-limitActiveServiceSlotsPerNode" being set to valid boolean false
+			limitActiveServiceSlotsPerNode := true
+
+			// if there is a Labels object, then check if "eyz-limitActiveServiceSlotsPerNode" is set
+			if candidateTaskSpecContainer.Container.Labels != nil {
+				if labelStringValue, labelExists := candidateTaskSpecContainer.Container.Labels["eyz-limitActiveServiceSlotsPerNode"]; labelExists {
+					// if the label's string value parses to a boolean, then use that policy instead of the default for limitActiveServiceSlotsPerNode
+					if overrideLimitActiveServiceSlotsPerNode, booleanParseErr := strconv.ParseBool(labelStringValue); booleanParseErr == nil {
+						limitActiveServiceSlotsPerNode = overrideLimitActiveServiceSlotsPerNode
+					}
+				}
+			}
+
+			nodeInfoCheck, nodeInfoErr := s.nodeSet.nodeInfo(node.ID)
+			if nodeInfoErr == nil && limitActiveServiceSlotsPerNode && nodeInfoCheck.ActiveTasksCountByService[t.ServiceID] > 0 {
+				log.G(ctx).WithField("task.id", t.ID).Debugf("not assigning to node %s, because this node already has %v of service ID %v active", node.ID, nodeInfoCheck.ActiveTasksCountByService[t.ServiceID], t.ServiceID)
+				continue
+			}
+		}
+		// eyz STOP: support service level anti-affinity via label eyz-limitActiveServiceSlotsPerNode
 
 		log.G(ctx).WithField("task.id", t.ID).Debugf("assigning to node %s", node.ID)
 		newT := *t

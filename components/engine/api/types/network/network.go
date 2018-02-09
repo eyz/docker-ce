@@ -26,6 +26,10 @@ type EndpointIPAMConfig struct {
 	IPv4Address  string   `json:",omitempty"`
 	IPv6Address  string   `json:",omitempty"`
 	LinkLocalIPs []string `json:",omitempty"`
+	// eyz START: support sending hostname and domainname in IPAM
+	Hostname   string `json:",omitempty"`
+	Domainname string `json:",omitempty"`
+	// eyz END: support sending hostname and domainname in IPAM
 }
 
 // Copy makes a copy of the endpoint ipam config

@@ -1499,6 +1499,13 @@ func (n *network) requestPoolHelper(ipam ipamapi.Ipam, addressSpace, preferredPo
 			return poolID, pool, meta, nil
 		}
 
+		// eyz START: support optional skip of IPAM pool conflict checking
+		// if conflictCheck == "skip" from the IPAM pool metadata response, then we don't need to check for conflicts (in FindAvailableNetwork), and we take use the network that was given
+		if conflictCheck, ok := meta["conflictCheck"]; ok && conflictCheck == "skip" {
+			return poolID, pool, meta, nil
+		}
+		// eyz STOP: support optional skip of IPAM pool conflict checking
+
 		// Check for overlap and if none found, we have found the right pool.
 		if _, err := netutils.FindAvailableNetwork([]*net.IPNet{pool}); err == nil {
 			return poolID, pool, meta, nil
@@ -2074,10 +2081,12 @@ func (n *network) createLoadBalancerSandbox() error {
 	}()
 
 	endpointName := n.name + "-endpoint"
+	// eyz START: support sending hostname and domainname in IPAM
 	epOptions := []EndpointOption{
-		CreateOptionIpam(n.loadBalancerIP, nil, nil, nil),
+		CreateOptionIpam(n.loadBalancerIP, nil, nil, "", "", nil),
 		CreateOptionLoadBalancer(),
 	}
+	// eyz STOP: support sending hostname and domainname in IPAM
 	ep, err := n.createEndpoint(endpointName, epOptions...)
 	if err != nil {
 		return err

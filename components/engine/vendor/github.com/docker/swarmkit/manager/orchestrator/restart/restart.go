@@ -201,6 +201,12 @@ func (r *Supervisor) shouldRestart(ctx context.Context, t *api.Task, service *ap
 		return false
 	}
 
+	// eyz START: Swarm tasks in an orphaned state should not be allowed to restart
+	if t.Status.State == api.TaskStateOrphaned {
+		return false
+	}
+	// eyz STOP: Swarm tasks in an orphaned state should not be allowed to restart
+
 	if t.Spec.Restart == nil || t.Spec.Restart.MaxAttempts == 0 {
 		return true
 	}
@@ -306,9 +312,12 @@ func (r *Supervisor) UpdatableTasksInSlot(ctx context.Context, slot orchestrator
 
 	var updatable orchestrator.Slot
 	for _, t := range slot {
-		if t.DesiredState <= api.TaskStateRunning {
+		// eyz START: allow Swarm tasks in a remove state to be transitioned
+		// if t.DesiredState <= api.TaskStateRunning {
+		if t.DesiredState <= api.TaskStateRunning || t.DesiredState >= api.TaskStateRemove {
 			updatable = append(updatable, t)
 		}
+		// eyz STOP: allow Swarm tasks in a remove state to be transitioned
 	}
 	if len(updatable) > 0 {
 		return updatable
@@ -462,7 +471,9 @@ func (r *Supervisor) DelayStart(ctx context.Context, _ store.Tx, oldTask *api.Ta
 		if waitForTask {
 			select {
 			case <-watch:
-			case <-oldTaskTimer.C:
+				// eyz START: prevent oldTaskTimer from allowing the slot to be prematurely updated
+				//case <-oldTaskTimer.C:
+				// eyz STOP: prevent oldTaskTimer from allowing the slot to be prematurely updated
 			case <-ctx.Done():
 				return
 			}

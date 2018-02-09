@@ -927,7 +927,8 @@ var (
 )
 
 // CreateOptionIpam function returns an option setter for the ipam configuration for this endpoint
-func CreateOptionIpam(ipV4, ipV6 net.IP, llIPs []net.IP, ipamOptions map[string]string) EndpointOption {
+// eyz START: support sending hostname and domainname in IPAM
+func CreateOptionIpam(ipV4, ipV6 net.IP, llIPs []net.IP, hostname, domainname string, ipamOptions map[string]string) EndpointOption {
 	return func(ep *endpoint) {
 		ep.prefAddress = ipV4
 		ep.prefAddressV6 = ipV6
@@ -941,8 +942,20 @@ func CreateOptionIpam(ipV4, ipV6 net.IP, llIPs []net.IP, ipamOptions map[string]
 			}
 		}
 		ep.ipamOptions = ipamOptions
+
+		if ep.ipamOptions == nil && (hostname != "" || domainname != "") {
+			ep.ipamOptions = make(map[string]string)
+		}
+		if hostname != "" {
+			ep.ipamOptions["Hostname"] = hostname
+		}
+		if domainname != "" {
+			ep.ipamOptions["Domainname"] = domainname
+		}
 	}
 }
+
+// eyz END: support sending hostname and domainname in IPAM
 
 // CreateOptionExposedPorts function returns an option setter for the container exposed
 // ports option to be passed to network.CreateEndpoint() method.
@@ -999,6 +1012,9 @@ func CreateOptionAlias(name string, alias string) EndpointOption {
 			ep.aliases = make(map[string]string)
 		}
 		ep.aliases[alias] = name
+		// eyz START: add network alias which includes the container FQDN (Hostname + Domainname)
+		logrus.Infof("libnetwork/endpoint.go CreateOptionAlias added ep.aliases[\"%s\"] = \"%s\"", alias, name)
+		// eyz STOP: add network alias which includes the container FQDN (Hostname + Domainname)
 	}
 }
 
